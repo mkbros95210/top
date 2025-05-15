@@ -1,0 +1,465 @@
+/**
+ * Product Logic - Helper functions for Product operations
+ */
+
+const CategoryDiscount = require('../../models/CategoryDiscount');
+const FavoriteProduct = require('../../models/FavoriteProduct');
+const Order = require('../../models/Order');
+const OrderDetail = require('../../models/OrderDetail');
+const Product = require('../../models/Product');
+const Review = require('../../models/Review');
+const User = require('../../models/User');
+const Helpers = require('./helpers');
+
+/**
+ * Get product by ID
+ * @param {string} id - Product ID
+ * @returns {Promise<Object>} Product with ratings and reviews
+ */
+const get_product = async (id) => {
+    return await Product.findOne({ _id: id, status: 1 })
+        .populate('wishlist')
+        .populate('rating')
+        .populate({
+            path: 'active_reviews',
+            populate: {
+                path: 'customer'
+            }
+        });
+};
+
+/**
+ * Get latest products
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated products
+ */
+const get_latest_products = async (limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    
+    const products = await Product.find({ status: 1 })
+        .populate('wishlist')
+        .populate('rating')
+        .populate('active_reviews')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit);
+    
+    const total = await Product.countDocuments({ status: 1 });
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products
+    };
+};
+
+/**
+ * Get favorite products for a user
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @param {string} user_id - User ID
+ * @returns {Promise<Object>} Paginated favorite products
+ */
+const get_favorite_products = async (limit, offset, user_id) => {
+    limit = limit || 10;
+    offset = offset || 1;
+    const skip = (offset - 1) * limit;
+    
+    // Get user's favorite products
+    const user = await User.findById(user_id).populate('favorite_products');
+    const favorite_product_ids = user.favorite_products.map(fp => fp.product_id);
+    
+    // Get favorite products
+    const products = await Product.find({ _id: { $in: favorite_product_ids } })
+        .skip(skip)
+        .limit(limit);
+    
+    const total = await Product.countDocuments({ _id: { $in: favorite_product_ids } });
+    
+    // Format products
+    const formatted_products = await Helpers.product_data_formatting(products, true);
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products: formatted_products
+    };
+};
+
+/**
+ * Get related products
+ * @param {string} product_id - Product ID
+ * @returns {Promise<Array>} Related products
+ */
+const get_related_products = async (product_id) => {
+    const product = await Product.findById(product_id);
+    if (!product) return [];
+    
+    return await Product.find({
+        category_ids: product.category_ids,
+        _id: { $ne: product._id },
+        status: 1
+    })
+    .populate('wishlist')
+    .populate('rating')
+    .populate('active_reviews')
+    .limit(10);
+};
+
+/**
+ * Search products by name
+ * @param {string} name - Search query
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated search results
+ */
+const search_products = async (name, limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    const keywords = name.split(' ');
+    
+    // Create search query with keywords
+    const searchQuery = {
+        status: 1,
+        $or: [
+            ...keywords.map(keyword => ({ name: { $regex: keyword, $options: 'i' } })),
+            { 'tags.tag': { $in: keywords.map(keyword => new RegExp(keyword, 'i')) } }
+        ]
+    };
+    
+    const products = await Product.find(searchQuery)
+        .populate('wishlist')
+        .populate('rating')
+        .populate('active_reviews')
+        .skip(skip)
+        .limit(limit);
+    
+    const total = await Product.countDocuments(searchQuery);
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products
+    };
+};
+
+/**
+ * Get product reviews
+ * @param {string} id - Product ID
+ * @returns {Promise<Array>} Product reviews
+ */
+const get_product_review = async (id) => {
+    return await Review.find({ product_id: id, status: 1 });
+};
+
+/**
+ * Get rating counts by star value
+ * @param {Array} reviews - Array of reviews
+ * @returns {Array} Counts of 5, 4, 3, 2, 1 star reviews
+ */
+const get_rating = (reviews) => {
+    let rating5 = 0;
+    let rating4 = 0;
+    let rating3 = 0;
+    let rating2 = 0;
+    let rating1 = 0;
+    
+    reviews.forEach(review => {
+        if (review.rating === 5) rating5 += 1;
+        if (review.rating === 4) rating4 += 1;
+        if (review.rating === 3) rating3 += 1;
+        if (review.rating === 2) rating2 += 1;
+        if (review.rating === 1) rating1 += 1;
+    });
+    
+    return [rating5, rating4, rating3, rating2, rating1];
+};
+
+/**
+ * Get overall rating from reviews
+ * @param {Array} reviews - Array of reviews
+ * @returns {Array} [average rating, total rating count]
+ */
+const get_overall_rating = (reviews) => {
+    const totalRating = reviews.length;
+    let rating = 0;
+    
+    reviews.forEach(review => {
+        rating += review.rating;
+    });
+    
+    const overallRating = totalRating === 0 ? 0 : parseFloat((rating / totalRating).toFixed(2));
+    
+    return [overallRating, totalRating];
+};
+
+/**
+ * Get popular products
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated popular products
+ */
+const get_popular_products = async (limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    
+    const products = await Product.find({ status: 1 })
+        .populate('rating')
+        .populate('active_reviews')
+        .sort({ popularity_count: -1 })
+        .skip(skip)
+        .limit(limit);
+    
+    const total = await Product.countDocuments({ status: 1 });
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products
+    };
+};
+
+/**
+ * Get most viewed products
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated most viewed products
+ */
+const get_most_viewed_products = async (limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    
+    const products = await Product.find({ status: 1 })
+        .populate('rating')
+        .populate('active_reviews')
+        .sort({ view_count: -1 })
+        .skip(skip)
+        .limit(limit);
+    
+    const total = await Product.countDocuments({ status: 1 });
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products
+    };
+};
+
+/**
+ * Get trending products
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated trending products
+ */
+const get_trending_products = async (limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    
+    // Check if we have any orders
+    const orderDetailsCount = await OrderDetail.countDocuments();
+    
+    let products;
+    let total;
+    
+    if (orderDetailsCount > 0) {
+        // Get products ordered in the last 30 days
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        
+        // Aggregate to get products with order count
+        const productsWithOrderCount = await OrderDetail.aggregate([
+            { $match: { createdAt: { $gt: thirtyDaysAgo } } },
+            { $group: { _id: '$product_id', count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $skip: skip },
+            { $limit: limit }
+        ]);
+        
+        const productIds = productsWithOrderCount.map(p => p._id);
+        
+        products = await Product.find({ 
+            _id: { $in: productIds },
+            status: 1
+        })
+        .populate('rating')
+        .populate('active_reviews');
+        
+        // Sort products based on the order count
+        products = products.sort((a, b) => {
+            const aCount = productsWithOrderCount.find(p => p._id.equals(a._id))?.count || 0;
+            const bCount = productsWithOrderCount.find(p => p._id.equals(b._id))?.count || 0;
+            return bCount - aCount;
+        });
+        
+        total = await OrderDetail.aggregate([
+            { $match: { createdAt: { $gt: thirtyDaysAgo } } },
+            { $group: { _id: '$product_id' } },
+            { $count: 'total' }
+        ]);
+        
+        total = total.length > 0 ? total[0].total : 0;
+    } else {
+        // If no orders, return random products
+        products = await Product.find({ status: 1 })
+            .populate('rating')
+            .populate('active_reviews')
+            .skip(skip)
+            .limit(limit);
+        
+        total = await Product.countDocuments({ status: 1 });
+    }
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products
+    };
+};
+
+/**
+ * Get recommended products
+ * @param {Object} user - User object
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated recommended products
+ */
+const get_recommended_products = async (user, limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    
+    let products;
+    let total;
+    
+    if (user) {
+        // Get order IDs for the user
+        const orders = await Order.find({ user_id: user._id });
+        const orderIds = orders.map(order => order._id);
+        
+        // Get product IDs from order details
+        const orderDetails = await OrderDetail.find({ order_id: { $in: orderIds } });
+        const productIds = [...new Set(orderDetails.map(detail => detail.product_id))];
+        
+        // Get categories from those products
+        const purchasedProducts = await Product.find({ _id: { $in: productIds } });
+        
+        // Extract category IDs from products
+        const categoryIds = [];
+        purchasedProducts.forEach(product => {
+            const categories = typeof product.category_ids === 'string' 
+                ? JSON.parse(product.category_ids) 
+                : product.category_ids;
+                
+            categories.forEach(category => {
+                if (category.position === 1) {
+                    categoryIds.push(category.id);
+                }
+            });
+        });
+        
+        // Remove duplicates
+        const uniqueCategoryIds = [...new Set(categoryIds)];
+        
+        // Find products with these categories
+        const query = {
+            status: 1,
+            $or: uniqueCategoryIds.map(id => ({
+                'category_ids': { 
+                    $elemMatch: { 
+                        id: id, 
+                        position: 1 
+                    } 
+                }
+            }))
+        };
+        
+        products = await Product.find(query)
+            .populate('rating')
+            .populate('active_reviews')
+            .skip(skip)
+            .limit(limit);
+            
+        total = await Product.countDocuments(query);
+    } else {
+        // If no user, return random products
+        products = await Product.find({ status: 1 })
+            .populate('rating')
+            .populate('active_reviews')
+            .skip(skip)
+            .limit(limit);
+            
+        total = await Product.countDocuments({ status: 1 });
+    }
+    
+    return {
+        total_size: total,
+        limit,
+        offset,
+        products
+    };
+};
+
+/**
+ * Get most reviewed products
+ * @param {number} limit - Number of products to return
+ * @param {number} offset - Page number
+ * @returns {Promise<Object>} Paginated most reviewed products
+ */
+const get_most_reviewed_products = async (limit = 10, offset = 1) => {
+    const skip = (offset - 1) * limit;
+    
+    // Aggregate to get products with review count
+    const productsWithReviewCount = await Review.aggregate([
+        { $match: { status: 1 } },
+        { $group: { _id: '$product_id', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $skip: skip },
+        { $limit: limit }
+    ]);
+    
+    const productIds = productsWithReviewCount.map(p => p._id);
+    
+    const products = await Product.find({ 
+        _id: { $in: productIds },
+        status: 1
+    })
+    .populate('rating')
+    .populate('active_reviews');
+    
+    // Sort products based on the review count
+    products.sort((a, b) => {
+        const aCount = productsWithReviewCount.find(p => p._id.equals(a._id))?.count || 0;
+        const bCount = productsWithReviewCount.find(p => p._id.equals(b._id))?.count || 0;
+        return bCount - aCount;
+    });
+    
+    const total = await Review.aggregate([
+        { $match: { status: 1 } },
+        { $group: { _id: '$product_id' } },
+        { $count: 'total' }
+    ]);
+    
+    return {
+        total_size: total.length > 0 ? total[0].total : 0,
+        limit,
+        offset,
+        products
+    };
+};
+
+module.exports = {
+    get_product,
+    get_latest_products,
+    get_favorite_products,
+    get_related_products,
+    search_products,
+    get_product_review,
+    get_rating,
+    get_overall_rating,
+    get_popular_products,
+    get_most_viewed_products,
+    get_trending_products,
+    get_recommended_products,
+    get_most_reviewed_products
+};
